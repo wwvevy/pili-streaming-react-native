@@ -18,6 +18,7 @@ import com.facebook.react.uimanager.ThemedReactContext;
 import com.facebook.react.uimanager.annotations.ReactProp;
 import com.facebook.react.uimanager.events.RCTEventEmitter;
 import com.qiniu.pili.droid.rnpili.utils.Utils;
+import com.qiniu.pili.droid.rnpili.gles.FBO;
 import com.qiniu.pili.droid.streaming.AVCodecType;
 import com.qiniu.pili.droid.streaming.CameraStreamingSetting;
 import com.qiniu.pili.droid.streaming.MediaStreamingManager;
@@ -28,6 +29,7 @@ import com.qiniu.pili.droid.streaming.StreamingProfile;
 import com.qiniu.pili.droid.streaming.StreamingSessionListener;
 import com.qiniu.pili.droid.streaming.StreamingState;
 import com.qiniu.pili.droid.streaming.StreamingStateChangedListener;
+import com.qiniu.pili.droid.streaming.SurfaceTextureCallback;
 import com.qiniu.pili.droid.streaming.WatermarkSetting;
 import com.qiniu.pili.droid.streaming.microphone.AudioMixer;
 import com.qiniu.pili.droid.streaming.microphone.OnAudioMixListener;
@@ -42,11 +44,12 @@ import androidx.annotation.Nullable;
 
 public class PLStreamingViewManager extends SimpleViewManager<CameraPreviewFrameView>
         implements CameraPreviewFrameView.Listener, StreamingSessionListener, StreamingStateChangedListener,
-        StreamStatusCallback, LifecycleEventListener {
+        StreamStatusCallback, LifecycleEventListener, SurfaceTextureCallback {
     private static final String TAG = "PLStreamingViewManager";
     private static final String EXPORT_COMPONENT_NAME = "PLRNMediaStreaming";
 
     private static final String STATE = "state";
+    private FBO mFBO = new FBO();
 
     private ThemedReactContext mReactContext;
     private RCTEventEmitter mEventEmitter;
@@ -117,6 +120,11 @@ public class PLStreamingViewManager extends SimpleViewManager<CameraPreviewFrame
     public void onDropViewInstance(CameraPreviewFrameView view) {
         Log.i(TAG, "onDropViewInstance");
         super.onDropViewInstance(view);
+        mMediaStreamingManager.pause();
+        mMediaStreamingManager.stopStreaming();
+        mMediaStreamingManager.destroy();
+        mMediaStreamingManager = null;
+        mProfile = null;
         mReactContext.removeLifecycleEventListener(this);
     }
 
@@ -243,6 +251,18 @@ public class PLStreamingViewManager extends SimpleViewManager<CameraPreviewFrame
         mMediaStreamingManager.setStreamingSessionListener(this);
         mMediaStreamingManager.setStreamingStateListener(this);
         mMediaStreamingManager.setStreamStatusCallback(this);
+        mMediaStreamingManager.pause();
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    Thread.sleep(100);  //线程休眠10秒执行
+                    mMediaStreamingManager.resume();
+                } catch (InterruptedException e) {
+                    e.printStackTrace();
+                }
+            }
+        }).start();
     }
 
     @ReactProp(name = "rtmpURL")
@@ -543,7 +563,51 @@ public class PLStreamingViewManager extends SimpleViewManager<CameraPreviewFrame
 
     @Override
     public boolean onZoomValueChanged(float factor) {
+        if (mIsReady && mMediaStreamingManager.isZoomSupported()) {
+            mCurrentZoom = (int) (mMaxZoom * factor);
+            mCurrentZoom = Math.min(mCurrentZoom, mMaxZoom);
+            mCurrentZoom = Math.max(0, mCurrentZoom);
+            Log.d(TAG, "zoom ongoing, scale: " + mCurrentZoom + ",factor:" + factor + ",maxZoom:" + mMaxZoom);
+            mMediaStreamingManager.setZoomValue(mCurrentZoom);
+        }
         return false;
+    }
+
+    @Override
+    public void onSurfaceCreated() {
+        Log.i(TAG, "onSurfaceCreated");
+        /**
+         * only used in custom beauty algorithm case
+         */
+        mFBO.initialize(mReactContext);
+    }
+
+    @Override
+    public void onSurfaceChanged(int width, int height) {
+        Log.i(TAG, "onSurfaceChanged width:" + width + ",height:" + height);
+        /**
+         * only used in custom beauty algorithm case
+         */
+        mFBO.updateSurfaceSize(width, height);
+    }
+
+    @Override
+    public void onSurfaceDestroyed() {
+        Log.i(TAG, "onSurfaceDestroyed");
+        /**
+         * only used in custom beauty algorithm case
+         */
+        mFBO.release();
+    }
+
+    @Override
+    public int onDrawFrame(int texId, int texWidth, int texHeight, float[] transformMatrix) {
+        /**
+         * When using custom beauty algorithm, you should return a new texId from the SurfaceTexture.
+         * newTexId should not equal with texId, Otherwise, there is no filter effect.
+         */
+        int newTexId = mFBO.drawFrame(texId, texWidth, texHeight);
+        return newTexId;
     }
 
     @Override
@@ -559,7 +623,20 @@ public class PLStreamingViewManager extends SimpleViewManager<CameraPreviewFrame
 
     @Override
     public Camera.Size onPreviewSizeSelected(List<Camera.Size> list) {
-        return null;
+        Camera.Size size = null;
+        if (list != null) {
+            StreamingProfile.VideoEncodingSize encodingSize = mProfile.getVideoEncodingSize(CameraStreamingSetting.PREVIEW_SIZE_RATIO.RATIO_4_3);
+            for (Camera.Size s : list) {
+                if (s.width >= encodingSize.width && s.height >= encodingSize.height) {
+                    if (true) {
+                        size = s;
+                        Log.d(TAG, "selected size :" + size.width + "x" + size.height);
+                    }
+                    break;
+                }
+            }
+        }
+        return size;
     }
 
     @Override
